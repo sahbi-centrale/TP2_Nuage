@@ -48,11 +48,13 @@ import sys
 #
 
 
-def best_rigid_transform(data, ref):
+
+
+def best_rigid_transform(data: np.ndarray, ref: np.ndarray):
     '''
     Computes the least-squares best-fit transform that maps corresponding points data to ref.
     Inputs :
-        data = (d x N) matrix where "N" is the number of points and "d" the dimension
+         dat = (d x N) matrix where "N" is the number of points and "d" the dimension
          ref = (d x N) matrix where "N" is the number of points and "d" the dimension
     Returns :
            R = (d x d) rotation matrix
@@ -60,21 +62,83 @@ def best_rigid_transform(data, ref):
            Such that R * data + T is aligned on ref
     '''
 
-    # YOUR CODE
-    R = np.eye(data.shape[0])
-    T = np.zeros((data.shape[0],1))
+    mean_data = np.mean(data, axis=1, keepdims = True)
+    mean_ref = np.mean(ref, axis=1, keepdims=True)
+    new_data = data - mean_data
+    new_ref = ref - mean_ref
+    H = new_data.dot(new_ref.T)
+    u, _, vt = np.linalg.svd(H)
+    R = (vt.T).dot(u.T)
+    if np.linalg.det(R) < 0:
+        u[:, -1] *= -1
+        R = (vt.T).dot(u.T)
+    T = mean_ref - R.dot(mean_data)
+    return R , T 
 
-    return R, T
+
 
 
 def icp_point_to_point(data, ref, max_iter, RMS_threshold):
+  
+    data_aligned = np.copy(data)
+    leaf_size = 20
+    tree = KDTree(ref.T, leaf_size=leaf_size)
+
+    # Initialize lists to store transformations and errors
+    R_list, T_list, neighbors_list, RMS_list = [], [], [], []
+    R_prev = np.eye(ref.shape[0])
+    T_prev = np.zeros((ref.shape[0], 1))
+    
+    rms_current = np.inf
+
+    for it in range(max_iter):
+        # Break loop if RMS error is below threshold
+        if rms_current < RMS_threshold:
+            break
+
+        # Find nearest neighbors in ref for each point in data_aligned
+        ref_nearest_index = tree.query(data_aligned.T, k=1, return_distance=False)[:, 0]
+        ref_nearest = ref[:, ref_nearest_index]
+
+        # Store the indices of nearest neighbors
+        neighbors_list.append(ref_nearest_index.copy())
+
+        # Compute the best rigid transformation
+        R, T = best_rigid_transform(data_aligned, ref_nearest)
+
+        # Update data_aligned with the current transformation
+        data_aligned = np.dot(R, data_aligned) + T
+
+        # Update the transformation matrices
+        T = np.dot(R, T_prev) + T
+        R = np.dot(R, R_prev)
+
+        # Store the current transformation
+        R_prev, T_prev = R, T
+        R_list.append(R.copy())
+        T_list.append(T.copy())
+
+        # Compute and store current RMS error
+        rms_current = np.sqrt(np.mean(np.linalg.norm(data_aligned - ref_nearest, axis=0)))
+        RMS_list.append(rms_current)
+
+    return data_aligned, R_list, T_list, neighbors_list, RMS_list
+
+
+
+
+
+
+def icp_point_to_point_fast(data, ref, max_iter, RMS_threshold, sampling_limit):
     '''
     Iterative closest point algorithm with a point to point strategy.
     Inputs :
-        data = (d x N_data) matrix where "N_data" is the number of points and "d" the dimension
+        dat = (d x N_dat) matrix where "N_dat" is the number of points and "d" the dimension
         ref = (d x N_ref) matrix where "N_ref" is the number of points and "d" the dimension
         max_iter = stop condition on the number of iterations
         RMS_threshold = stop condition on the distance
+        Tree = pre-buit KDTree (leaf size=150 is a good value)
+        true_rmse = Full RMSE computation
     Returns :
         data_aligned = data aligned on reference cloud
         R_list = list of the (d x d) rotation matrices found at each iteration
@@ -82,21 +146,48 @@ def icp_point_to_point(data, ref, max_iter, RMS_threshold):
         neighbors_list = At each iteration, you search the nearest neighbors of each data point in
         the ref cloud and this obtain a (1 x N_data) array of indices. This is the list of those
         arrays at each iteration
-           
+        total = total time spent in the function (for benchmarking)
+
     '''
 
     # Variable for aligned data
     data_aligned = np.copy(data)
+    leaf_size = 20
+    tree = KDTree(ref.T, leaf_size=leaf_size)
 
-    # Initiate lists
-    R_list = []
-    T_list = []
-    neighbors_list = []
-    RMS_list = []
-
-    # YOUR CODE
+    R_list, T_list, neighbors_list, RMS_list = [], [], [], []
+    R_prev = np.eye(ref.shape[0])
+    T_prev = np.zeros((ref.shape[0], 1))
+    
+    rms_current = np.inf
+    total = 0.
+    for it in range(max_iter):
+        if rms_current < RMS_threshold:
+            break
+        selection_indexes = np.random.choice(data_aligned.shape[-1], size=sampling_limit, replace=False)
+        data_selection = data_aligned[:, selection_indexes]
+        ref_nearest_index = tree.query(data_selection.T, k=1, return_distance=False)[:, 0]
+        ref_nearest = ref[:, ref_nearest_index]
+        neighbors_list.append(ref_nearest_index.copy())
+        R, T = best_rigid_transform(data_selection, ref_nearest)
+        data_aligned = np.dot(R, data_aligned) + T
+        T = np.dot(R, T_prev) + T
+        R = np.dot(R, R_prev)
+        R_prev = R
+        T_prev = T
+        R_list.append(R.copy())
+        T_list.append(T.copy())
+        rms = np.sqrt(np.linalg.norm(data_aligned[:, selection_indexes] - ref_nearest, axis=0).mean())
+        RMS_list.append(rms)
 
     return data_aligned, R_list, T_list, neighbors_list, RMS_list
+
+
+
+
+
+
+
 
 
 
@@ -115,13 +206,15 @@ if __name__ == '__main__':
     # Transformation estimation
     # *************************
     #
+    
+
 
     # If statement to skip this part if wanted
-    if True:
+    if False:
 
         # Cloud paths
-        bunny_o_path = '../data/bunny_original.ply'
-        bunny_r_path = '../data/bunny_returned.ply'
+        bunny_o_path = 'bunny_original.ply'
+        bunny_r_path = 'bunny_returned.ply'
 
 		# Load clouds
         bunny_o_ply = read_ply(bunny_o_path)
@@ -130,7 +223,9 @@ if __name__ == '__main__':
         bunny_r = np.vstack((bunny_r_ply['x'], bunny_r_ply['y'], bunny_r_ply['z']))
 
         # Find the best transformation
+        print("before")
         R, T = best_rigid_transform(bunny_r, bunny_o)
+        print("after")
 
         # Apply the tranformation
         bunny_r_opt = R.dot(bunny_r) + T
@@ -154,11 +249,11 @@ if __name__ == '__main__':
     #
 
     # If statement to skip this part if wanted
-    if False:
+    if  False:
 
         # Cloud paths
-        ref2D_path = '../data/ref2D.ply'
-        data2D_path = '../data/data2D.ply'
+        ref2D_path = 'ref2D.ply'
+        data2D_path = 'data2D.ply'
         
         # Load clouds
         ref2D_ply = read_ply(ref2D_path)
@@ -181,8 +276,8 @@ if __name__ == '__main__':
     if False:
 
         # Cloud paths
-        bunny_o_path = '../data/bunny_original.ply'
-        bunny_p_path = '../data/bunny_perturbed.ply'
+        bunny_o_path = 'bunny_original.ply'
+        bunny_p_path = 'bunny_perturbed.ply'
         
         # Load clouds
         bunny_o_ply = read_ply(bunny_o_path)
@@ -198,5 +293,27 @@ if __name__ == '__main__':
         
         # Plot RMS
         plt.plot(RMS_list)
+        plt.show()
+      # If statement to skip this part if wanted
+
+    if True:
+
+        # Cloud paths
+        Notre_Dame_Des_Champs_1_path = 'Notre_Dame_Des_Champs_1.ply'
+        Notre_Dame_Des_Champs_2_path = 'Notre_Dame_Des_Champs_2.ply'
+        
+        # Load clouds
+        Notre_Dame_Des_Champs_1_ply = read_ply(Notre_Dame_Des_Champs_1_path)
+        Notre_Dame_Des_Champs_2_ply = read_ply(Notre_Dame_Des_Champs_2_path)
+        Notre_Dame_Des_Champs_1 = np.vstack((Notre_Dame_Des_Champs_1_ply['x'], Notre_Dame_Des_Champs_1_ply['y'], Notre_Dame_Des_Champs_1_ply['z']))
+        Notre_Dame_Des_Champs_2 = np.vstack((Notre_Dame_Des_Champs_2_ply['x'], Notre_Dame_Des_Champs_2_ply['y'], Notre_Dame_Des_Champs_2_ply['z']))
+
+        # Apply ICP
+        Notre_Dame_Des_Champs_2_opt, R_list, T_list, neighbors_list, RMS_list = icp_point_to_point_fast(Notre_Dame_Des_Champs_2, Notre_Dame_Des_Champs_1, 25, 1e-4 , 10000)
+        x = np.linspace(0,25,25)
+        
+        # Plot RMS
+        print(len(RMS_list))
+        plt.plot(x ,RMS_list)
         plt.show()
 
